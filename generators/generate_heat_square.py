@@ -31,19 +31,21 @@ class HeatSquareConfig:
     test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    train_history_fraction: float = 0.25
+    train_history_fraction: float = 0.30
     test_history_fraction: float = 2.0
-    ic_modes: int = 4
+    ic_modes: int = 5
+    source_decay: float = 1.40
 
 
 def build_parameter_matrix(config: HeatSquareConfig) -> tuple[np.ndarray, list[str]]:
     physical_bounds = [
-        ("diffusivity", 0.08, 0.28),
-        ("left_boundary", -0.40, 0.40),
-        ("right_boundary", -0.40, 0.40),
-        ("bottom_boundary", -0.40, 0.40),
-        ("top_boundary", -0.40, 0.40),
-        ("initial_amplitude", 0.05, 0.24),
+        ("diffusivity", 0.08, 0.24),
+        ("left_boundary", -0.65, 0.65),
+        ("right_boundary", -0.65, 0.65),
+        ("bottom_boundary", -0.65, 0.65),
+        ("top_boundary", -0.65, 0.65),
+        ("initial_amplitude", 0.08, 0.35),
+        ("source_amplitude", 0.00, 0.16),
     ]
     physical_parameters, parameter_names = parameter_table(
         physical_bounds,
@@ -76,6 +78,29 @@ def interior_perturbation(
     if norm < 1.0e-12:
         return np.zeros_like(field)
     return amplitude * field / norm
+
+
+def signed_blob_field(
+    xx: np.ndarray,
+    yy: np.ndarray,
+    *,
+    seed: int,
+    num_blobs: int = 3,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    field = np.zeros_like(xx, dtype=np.float64)
+    for _ in range(num_blobs):
+        center_x = rng.uniform(0.18, 0.82)
+        center_y = rng.uniform(0.18, 0.82)
+        width = rng.uniform(0.08, 0.20)
+        weight = rng.uniform(-1.0, 1.0)
+        field += weight * np.exp(-((xx - center_x) ** 2 + (yy - center_y) ** 2) / (2.0 * width**2))
+
+    field -= field.mean()
+    norm = np.max(np.abs(field))
+    if norm < 1.0e-12:
+        return np.zeros_like(field)
+    return field / norm
 
 
 def apply_boundaries(
@@ -112,12 +137,13 @@ def solve_trajectory(
         bottom_boundary,
         top_boundary,
         initial_amplitude,
+        source_amplitude,
         initial_condition_seed,
     ) = parameters
     dx = float(x[1] - x[0])
-    steady_time_estimate = 2.0 / (diffusivity * np.pi**2)
+    steady_time_estimate = 2.5 / (diffusivity * np.pi**2)
     total_time = history_fraction * steady_time_estimate
-    max_dt = 0.22 * dx * dx / diffusivity
+    max_dt = 0.18 * dx * dx / diffusivity
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
@@ -133,12 +159,22 @@ def solve_trajectory(
         amplitude=float(initial_amplitude),
         modes=config.ic_modes,
     )
+    state += 0.45 * initial_amplitude * signed_blob_field(
+        xx,
+        yy,
+        seed=deterministic_seed("heat_blobs", int(round(initial_condition_seed))),
+    )
     apply_boundaries(
         state,
         left=float(left_boundary),
         right=float(right_boundary),
         bottom=float(bottom_boundary),
         top=float(top_boundary),
+    )
+    source_profile = signed_blob_field(
+        xx,
+        yy,
+        seed=deterministic_seed("heat_source", int(round(initial_condition_seed))),
     )
 
     snapshots: list[np.ndarray] = []
@@ -148,6 +184,8 @@ def solve_trajectory(
         save_pointer += 1
 
     for step in range(1, num_steps + 1):
+        current_time = (step - 1) * dt
+        source = source_amplitude * np.exp(-config.source_decay * current_time) * source_profile
         laplacian = (
             state[1:-1, 2:]
             + state[1:-1, :-2]
@@ -156,7 +194,11 @@ def solve_trajectory(
             - 4.0 * state[1:-1, 1:-1]
         ) / (dx * dx)
         updated = state.copy()
-        updated[1:-1, 1:-1] = state[1:-1, 1:-1] + diffusivity * dt * laplacian
+        updated[1:-1, 1:-1] = (
+            state[1:-1, 1:-1]
+            + diffusivity * dt * laplacian
+            + dt * source[1:-1, 1:-1]
+        )
         apply_boundaries(
             updated,
             left=float(left_boundary),
@@ -215,9 +257,9 @@ def generate_dataset(config: HeatSquareConfig | None = None) -> dict[str, Path]:
 
     metadata = {
         "case": "heat_square",
-        "equation": "u_t = diffusivity * (u_xx + u_yy)",
+        "equation": "u_t = diffusivity * (u_xx + u_yy) + source(x, y, t)",
         "boundary_conditions": "Dirichlet on all four sides with parameterized values",
-        "notes": "Training trajectories are short transients, while the held-out test trajectory is extended so the final snapshots sit near the steady boundary-value solution.",
+        "notes": "The square case now combines stronger off-center initial structure with a deterministic decaying interior heater-cooler field, so the transient develops moving thermal layers before settling back toward the boundary-driven steady solution.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"
@@ -261,6 +303,7 @@ def parse_args() -> HeatSquareConfig:
     parser.add_argument("--train-history-fraction", type=float, default=HeatSquareConfig.train_history_fraction)
     parser.add_argument("--test-history-fraction", type=float, default=HeatSquareConfig.test_history_fraction)
     parser.add_argument("--ic-modes", type=int, default=HeatSquareConfig.ic_modes)
+    parser.add_argument("--source-decay", type=float, default=HeatSquareConfig.source_decay)
     args = parser.parse_args()
     return HeatSquareConfig(
         output_dir=args.output_dir,
@@ -273,6 +316,7 @@ def parse_args() -> HeatSquareConfig:
         train_history_fraction=args.train_history_fraction,
         test_history_fraction=args.test_history_fraction,
         ic_modes=args.ic_modes,
+        source_decay=args.source_decay,
     )
 
 

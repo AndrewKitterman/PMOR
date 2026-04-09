@@ -2,12 +2,12 @@
 
 This repository now contains four deterministic PDE data generators for parametric model order reduction experiments. The default lineup is intentionally split into `2 x 1D` and `2 x 2D` cases:
 
-- `damped_wave_1d`: damped wave equation with parameterized wave speed, damping, and Dirichlet boundary values.
-- `burgers_1d`: viscous Burgers equation on a periodic interval with parameterized viscosity and mean level.
-- `heat_square`: 2D heat equation on the unit square with parameterized boundary temperatures on all four sides.
-- `fisher_kpp_disk`: 2D Fisher-KPP reaction-diffusion equation on a disk embedded in a Cartesian grid.
+- `damped_wave_1d`: damped wave equation with parameterized wave speed, damping, boundary values, and a deterministic interior forcing profile.
+- `burgers_1d`: viscous Burgers equation on a periodic interval with sharper random initial conditions and a deterministic decaying forcing pulse.
+- `heat_square`: 2D heat equation on the unit square with parameterized boundary temperatures and a deterministic decaying heater-cooler source.
+- `fisher_kpp_disk`: 2D Fisher-KPP reaction-diffusion equation on a disk with richer seeded colonies and a spatially varying carrying capacity field.
 
-Each generator writes one training file and one testing file. By default, the first `50` parameter settings become training trajectories and the `51st` parameter setting is reserved as the held-out test trajectory. The training rollouts still cover only the early transient, about `25%` of a conservative steady-state time estimate, while the held-out test rollout is extended with more saved snapshots so its tail approaches steady state.
+Each generator writes one training file and one testing file. By default, the first `50` parameter settings become training trajectories and the `51st` parameter setting is reserved as the held-out test trajectory. The training rollouts still cover only the early transient, about `30%` of a conservative steady-state time estimate, while the held-out test rollout is extended with more saved snapshots so its tail approaches steady state.
 
 ## Repository Layout
 

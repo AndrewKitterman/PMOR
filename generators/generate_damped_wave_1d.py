@@ -32,19 +32,20 @@ class DampedWave1DConfig:
     test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    train_history_fraction: float = 0.25
+    train_history_fraction: float = 0.30
     test_history_fraction: float = 2.0
-    ic_modes: int = 5
+    ic_modes: int = 7
 
 
 def build_parameter_matrix(config: DampedWave1DConfig) -> tuple[np.ndarray, list[str]]:
     physical_bounds = [
-        ("wave_speed", 0.8, 1.8),
-        ("damping", 0.6, 1.4),
-        ("left_boundary", -0.25, 0.25),
-        ("right_boundary", -0.25, 0.25),
-        ("displacement_amplitude", 0.06, 0.32),
-        ("velocity_amplitude", 0.04, 0.20),
+        ("wave_speed", 0.85, 2.10),
+        ("damping", 0.30, 1.10),
+        ("left_boundary", -0.45, 0.45),
+        ("right_boundary", -0.45, 0.45),
+        ("displacement_amplitude", 0.10, 0.45),
+        ("velocity_amplitude", 0.08, 0.30),
+        ("forcing_amplitude", 0.00, 0.65),
     ]
     physical_parameters, parameter_names = parameter_table(
         physical_bounds,
@@ -64,6 +65,27 @@ def laplacian_1d(values: np.ndarray, dx: float) -> np.ndarray:
     return lap
 
 
+def localized_dirichlet_bump(x: np.ndarray, *, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    center = rng.uniform(0.22, 0.78)
+    width = rng.uniform(0.06, 0.18)
+    bump = np.exp(-0.5 * ((x - center) / width) ** 2) * x * (1.0 - x)
+    scale = np.max(np.abs(bump))
+    if scale < 1.0e-12:
+        return np.zeros_like(x)
+    return bump / scale
+
+
+def wave_forcing_profile(x: np.ndarray, *, seed: int) -> np.ndarray:
+    modal = sine_series(x, seed=seed, amplitude=1.0, modes=3)
+    bump = localized_dirichlet_bump(x, seed=seed + 17)
+    profile = 0.7 * modal + 0.3 * bump
+    scale = np.max(np.abs(profile))
+    if scale < 1.0e-12:
+        return np.zeros_like(x)
+    return profile / scale
+
+
 def solve_trajectory(
     x: np.ndarray,
     parameters: np.ndarray,
@@ -79,12 +101,13 @@ def solve_trajectory(
         right_bc,
         displacement_amplitude,
         velocity_amplitude,
+        forcing_amplitude,
         initial_condition_seed,
     ) = parameters
     dx = float(x[1] - x[0])
-    steady_time_estimate = 4.0 / damping
+    steady_time_estimate = 5.0 / damping
     total_time = history_fraction * steady_time_estimate
-    max_dt = 0.80 * dx / wave_speed
+    max_dt = 0.60 * dx / wave_speed
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
@@ -99,11 +122,23 @@ def solve_trajectory(
         amplitude=float(displacement_amplitude),
         modes=config.ic_modes,
     )
+    displacement += 0.35 * displacement_amplitude * localized_dirichlet_bump(
+        x,
+        seed=deterministic_seed("displacement_bump", seed_base),
+    )
     velocity = sine_series(
         x,
         seed=deterministic_seed("velocity", seed_base),
         amplitude=float(velocity_amplitude),
         modes=config.ic_modes,
+    )
+    velocity += 0.45 * velocity_amplitude * localized_dirichlet_bump(
+        x,
+        seed=deterministic_seed("velocity_bump", seed_base),
+    )
+    forcing = forcing_amplitude * wave_forcing_profile(
+        x,
+        seed=deterministic_seed("wave_forcing", seed_base),
     )
     displacement[0] = 0.0
     displacement[-1] = 0.0
@@ -116,7 +151,7 @@ def solve_trajectory(
         snapshots.append((displacement + steady_profile).astype(np.float32))
         save_pointer += 1
 
-    acceleration = wave_speed**2 * laplacian_1d(displacement, dx) - damping * velocity
+    acceleration = wave_speed**2 * laplacian_1d(displacement, dx) - damping * velocity + forcing
     current = displacement + dt * velocity + 0.5 * dt * dt * acceleration
     current[0] = 0.0
     current[-1] = 0.0
@@ -134,6 +169,7 @@ def solve_trajectory(
             2.0 * current
             - (1.0 - 0.5 * damping * dt) * previous
             + wave_speed**2 * dt * dt * lap
+            + dt * dt * forcing
         ) / (1.0 + 0.5 * damping * dt)
         next_state[0] = 0.0
         next_state[-1] = 0.0
@@ -186,9 +222,9 @@ def generate_dataset(config: DampedWave1DConfig | None = None) -> dict[str, Path
 
     metadata = {
         "case": "damped_wave_1d",
-        "equation": "u_tt + damping * u_t = wave_speed^2 * u_xx",
+        "equation": "u_tt + damping * u_t = wave_speed^2 * u_xx + forcing(x)",
         "boundary_conditions": "Dirichlet with parameterized left/right displacements",
-        "notes": "Training trajectories cover the early transient, while the held-out test trajectory runs through the long-time damped tail toward the static profile.",
+        "notes": "Each trajectory includes a deterministic static interior forcing profile plus richer displacement/velocity initial conditions, so the dataset shows longer ringing before relaxing toward a forced static profile.",
         "config": asdict(config),
     }
     output_dir = config.output_dir

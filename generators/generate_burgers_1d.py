@@ -32,16 +32,18 @@ class Burgers1DConfig:
     test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    train_history_fraction: float = 0.25
+    train_history_fraction: float = 0.30
     test_history_fraction: float = 2.0
-    ic_modes: int = 5
+    ic_modes: int = 7
+    forcing_decay: float = 1.25
 
 
 def build_parameter_matrix(config: Burgers1DConfig) -> tuple[np.ndarray, list[str]]:
     physical_bounds = [
-        ("viscosity", 0.025, 0.080),
-        ("mean_level", -0.35, 0.35),
-        ("initial_amplitude", 0.18, 0.75),
+        ("viscosity", 0.016, 0.065),
+        ("mean_level", -0.45, 0.45),
+        ("initial_amplitude", 0.22, 0.95),
+        ("forcing_amplitude", 0.00, 0.18),
     ]
     physical_parameters, parameter_names = parameter_table(
         physical_bounds,
@@ -69,6 +71,23 @@ def burgers_rhs(values: np.ndarray, viscosity: float, dx: float) -> np.ndarray:
     return advection + diffusion
 
 
+def periodic_bump_field(x: np.ndarray, *, seed: int, num_bumps: int = 2) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    field = np.zeros_like(x, dtype=np.float64)
+    for _ in range(num_bumps):
+        center = rng.uniform(0.0, 1.0)
+        width = rng.uniform(0.035, 0.11)
+        weight = rng.uniform(-1.0, 1.0)
+        wrapped_distance = np.minimum(np.abs(x - center), 1.0 - np.abs(x - center))
+        field += weight * np.exp(-0.5 * (wrapped_distance / width) ** 2)
+
+    field -= field.mean()
+    scale = np.max(np.abs(field))
+    if scale < 1.0e-12:
+        return np.zeros_like(x)
+    return field / scale
+
+
 def solve_trajectory(
     x: np.ndarray,
     parameters: np.ndarray,
@@ -77,24 +96,45 @@ def solve_trajectory(
     history_fraction: float,
     num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    viscosity, mean_level, initial_amplitude, initial_condition_seed = parameters
+    viscosity, mean_level, initial_amplitude, forcing_amplitude, initial_condition_seed = parameters
     dx = float(x[1] - x[0])
-    steady_time_estimate = 4.0 / (viscosity * (2.0 * np.pi) ** 2)
+    steady_time_estimate = 4.5 / (viscosity * (2.0 * np.pi) ** 2)
     total_time = history_fraction * steady_time_estimate
-    speed_bound = max(1.5, abs(mean_level) + 1.2 * initial_amplitude)
-    max_dt = min(0.35 * dx / speed_bound, 0.20 * dx * dx / viscosity)
+    speed_bound = max(1.8, abs(mean_level) + 1.6 * initial_amplitude + 0.5 * forcing_amplitude)
+    max_dt = min(0.25 * dx / speed_bound, 0.18 * dx * dx / viscosity)
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
         num_snapshots=num_snapshots,
     )
 
+    seed_base = int(round(initial_condition_seed))
     state = mean_level + periodic_series(
         x,
-        seed=int(round(initial_condition_seed)),
+        seed=seed_base,
         amplitude=float(initial_amplitude),
         modes=config.ic_modes,
     )
+    state += 0.55 * initial_amplitude * periodic_bump_field(
+        x,
+        seed=deterministic_seed("burgers_bumps", seed_base),
+    )
+    state -= state.mean()
+    state += mean_level
+    forcing_profile = periodic_series(
+        x,
+        seed=deterministic_seed("burgers_forcing", seed_base),
+        amplitude=1.0,
+        modes=3,
+    )
+    forcing_profile += 0.4 * periodic_bump_field(
+        x,
+        seed=deterministic_seed("burgers_forcing_bumps", seed_base),
+    )
+    forcing_profile -= forcing_profile.mean()
+    forcing_scale = np.max(np.abs(forcing_profile))
+    if forcing_scale > 1.0e-12:
+        forcing_profile /= forcing_scale
     snapshots: list[np.ndarray] = []
     save_pointer = 0
     if save_indices[save_pointer] == 0:
@@ -102,9 +142,22 @@ def solve_trajectory(
         save_pointer += 1
 
     for step in range(1, num_steps + 1):
-        stage_1 = state + dt * burgers_rhs(state, float(viscosity), dx)
-        stage_2 = 0.75 * state + 0.25 * (stage_1 + dt * burgers_rhs(stage_1, float(viscosity), dx))
-        next_state = (state + 2.0 * (stage_2 + dt * burgers_rhs(stage_2, float(viscosity), dx))) / 3.0
+        time_start = (step - 1) * dt
+        forcing_0 = forcing_amplitude * np.exp(-config.forcing_decay * time_start) * forcing_profile
+        stage_1 = state + dt * (burgers_rhs(state, float(viscosity), dx) + forcing_0)
+
+        time_mid = time_start + dt
+        forcing_1 = forcing_amplitude * np.exp(-config.forcing_decay * time_mid) * forcing_profile
+        stage_2 = 0.75 * state + 0.25 * (
+            stage_1 + dt * (burgers_rhs(stage_1, float(viscosity), dx) + forcing_1)
+        )
+
+        time_end = time_start + 0.5 * dt
+        forcing_2 = forcing_amplitude * np.exp(-config.forcing_decay * time_end) * forcing_profile
+        next_state = (
+            state
+            + 2.0 * (stage_2 + dt * (burgers_rhs(stage_2, float(viscosity), dx) + forcing_2))
+        ) / 3.0
         assert_finite("burgers_1d_state", next_state)
         state = next_state
         if save_pointer < save_indices.size and step == save_indices[save_pointer]:
@@ -153,9 +206,9 @@ def generate_dataset(config: Burgers1DConfig | None = None) -> dict[str, Path]:
 
     metadata = {
         "case": "burgers_1d",
-        "equation": "u_t + (0.5 * u^2)_x = viscosity * u_xx",
+        "equation": "u_t + (0.5 * u^2)_x = viscosity * u_xx + forcing(x, t)",
         "boundary_conditions": "Periodic",
-        "notes": "Training trajectories cover early transients, while the held-out test trajectory is extended to a near-steady constant profile.",
+        "notes": "Each trajectory uses a sharper random periodic initial condition plus a deterministic zero-mean decaying forcing pulse, which yields richer shock-merging transients before the solution relaxes toward its constant mean state.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"
@@ -199,6 +252,7 @@ def parse_args() -> Burgers1DConfig:
     parser.add_argument("--train-history-fraction", type=float, default=Burgers1DConfig.train_history_fraction)
     parser.add_argument("--test-history-fraction", type=float, default=Burgers1DConfig.test_history_fraction)
     parser.add_argument("--ic-modes", type=int, default=Burgers1DConfig.ic_modes)
+    parser.add_argument("--forcing-decay", type=float, default=Burgers1DConfig.forcing_decay)
     args = parser.parse_args()
     return Burgers1DConfig(
         output_dir=args.output_dir,
@@ -211,6 +265,7 @@ def parse_args() -> Burgers1DConfig:
         train_history_fraction=args.train_history_fraction,
         test_history_fraction=args.test_history_fraction,
         ic_modes=args.ic_modes,
+        forcing_decay=args.forcing_decay,
     )
 
 

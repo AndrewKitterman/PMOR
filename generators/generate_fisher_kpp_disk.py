@@ -33,15 +33,16 @@ class FisherKPPDiskConfig:
     test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    train_history_fraction: float = 0.25
+    train_history_fraction: float = 0.30
     test_history_fraction: float = 2.0
 
 
 def build_parameter_matrix(config: FisherKPPDiskConfig) -> tuple[np.ndarray, list[str]]:
     physical_bounds = [
-        ("diffusion", 0.010, 0.040),
-        ("growth_rate", 0.70, 1.60),
-        ("initial_amplitude", 0.35, 0.95),
+        ("diffusion", 0.008, 0.028),
+        ("growth_rate", 0.80, 1.90),
+        ("initial_amplitude", 0.10, 0.75),
+        ("carrying_capacity_contrast", 0.00, 0.40),
     ]
     physical_parameters, parameter_names = parameter_table(
         physical_bounds,
@@ -55,6 +56,62 @@ def build_parameter_matrix(config: FisherKPPDiskConfig) -> tuple[np.ndarray, lis
     return np.hstack([physical_parameters, ic_seeds]), parameter_names + ["initial_condition_seed"]
 
 
+def signed_disk_field(
+    xx: np.ndarray,
+    yy: np.ndarray,
+    mask: np.ndarray,
+    *,
+    seed: int,
+    num_blobs: int = 4,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    field = np.zeros_like(xx, dtype=np.float64)
+    for _ in range(num_blobs):
+        radius = np.sqrt(rng.uniform(0.0, 1.0)) * 0.30
+        angle = rng.uniform(0.0, 2.0 * np.pi)
+        center_x = 0.5 + radius * np.cos(angle)
+        center_y = 0.5 + radius * np.sin(angle)
+        width = rng.uniform(0.05, 0.15)
+        weight = rng.uniform(-1.0, 1.0)
+        field += weight * np.exp(-((xx - center_x) ** 2 + (yy - center_y) ** 2) / (2.0 * width**2))
+
+    field *= mask
+    masked_mean = field[mask].mean() if np.any(mask) else 0.0
+    field = (field - masked_mean) * mask
+    scale = np.max(np.abs(field)) if np.any(mask) else 0.0
+    if scale < 1.0e-12:
+        return np.zeros_like(field)
+    return field / scale
+
+
+def seeded_disk_profile(
+    xx: np.ndarray,
+    yy: np.ndarray,
+    mask: np.ndarray,
+    *,
+    seed: int,
+) -> np.ndarray:
+    radial = np.sqrt((xx - 0.5) ** 2 + (yy - 0.5) ** 2)
+    base = gaussian_blob_field(
+        xx,
+        yy,
+        mask,
+        seed=seed,
+        amplitude_range=(0.30, 0.95),
+        width_range=(0.04, 0.12),
+        num_blobs=4,
+    )
+    ring = np.exp(-((radial - 0.22) ** 2) / (2.0 * 0.05**2)) * mask
+    ring_scale = np.max(ring) if np.any(mask) else 0.0
+    if ring_scale > 1.0e-12:
+        ring = ring / ring_scale
+    profile = 0.7 * base + 0.3 * ring
+    scale = np.max(profile) if np.any(mask) else 0.0
+    if scale < 1.0e-12:
+        return np.zeros_like(profile)
+    return (profile / scale) * mask
+
+
 def solve_trajectory(
     x: np.ndarray,
     y: np.ndarray,
@@ -65,12 +122,13 @@ def solve_trajectory(
     history_fraction: float,
     num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    diffusion, growth_rate, initial_amplitude, initial_condition_seed = parameters
+    diffusion, growth_rate, initial_amplitude, carrying_capacity_contrast, initial_condition_seed = parameters
     dx = float(x[1] - x[0])
-    effective_rate = growth_rate + 10.0 * diffusion
-    steady_time_estimate = 4.0 / effective_rate
+    front_time = 0.95 / np.sqrt(max(diffusion * growth_rate, 1.0e-12))
+    reaction_time = 5.0 / growth_rate
+    steady_time_estimate = max(front_time, reaction_time)
     total_time = history_fraction * steady_time_estimate
-    max_dt = 0.22 * dx * dx / diffusion
+    max_dt = 0.18 * dx * dx / diffusion
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
@@ -78,13 +136,21 @@ def solve_trajectory(
     )
 
     xx, yy = np.meshgrid(x, y, indexing="xy")
-    state = float(initial_amplitude) * gaussian_blob_field(
+    seed_base = int(round(initial_condition_seed))
+    state = float(initial_amplitude) * seeded_disk_profile(
         xx,
         yy,
         mask,
-        seed=int(round(initial_condition_seed)),
+        seed=seed_base,
     )
     state *= mask
+    habitat = signed_disk_field(
+        xx,
+        yy,
+        mask,
+        seed=deterministic_seed("disk_habitat", seed_base),
+    )
+    carrying_capacity = np.clip(1.0 + carrying_capacity_contrast * habitat, 0.65, 1.35) * mask
 
     snapshots: list[np.ndarray] = []
     save_pointer = 0
@@ -105,8 +171,10 @@ def solve_trajectory(
         diffused *= mask
 
         growth_factor = np.exp(growth_rate * dt)
-        next_state = diffused * growth_factor / (1.0 + diffused * (growth_factor - 1.0))
-        next_state = np.clip(next_state, 0.0, 1.25)
+        next_state = carrying_capacity * diffused * growth_factor / (
+            carrying_capacity + diffused * (growth_factor - 1.0) + 1.0e-12
+        )
+        next_state = np.clip(next_state, 0.0, 1.55)
         next_state *= mask
         assert_finite("fisher_kpp_disk_state", next_state)
         state = next_state
@@ -163,9 +231,9 @@ def generate_dataset(config: FisherKPPDiskConfig | None = None) -> dict[str, Pat
 
     metadata = {
         "case": "fisher_kpp_disk",
-        "equation": "u_t = diffusion * Laplacian(u) + growth_rate * u * (1 - u)",
+        "equation": "u_t = diffusion * Laplacian(u) + growth_rate * u * (1 - u / K(x, y))",
         "boundary_conditions": "Embedded disk with homogeneous Dirichlet boundary values",
-        "notes": "Training trajectories cover only the early transient, while the held-out test trajectory is extended close to the nonlinear steady state on the disk.",
+        "notes": "The disk case now uses richer multi-seed initial colonies and a deterministic heterogeneous carrying-capacity field, which produces interacting invasion fronts before the held-out test approaches a spatially varying steady state.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"

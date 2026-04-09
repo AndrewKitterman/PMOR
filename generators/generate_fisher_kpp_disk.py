@@ -29,10 +29,12 @@ class FisherKPPDiskConfig:
     output_dir: Path = Path("data/fisher_kpp_disk")
     seed: int = 17320
     grid_size: int = 48
-    num_snapshots: int = 24
+    train_num_snapshots: int = 24
+    test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    history_fraction: float = 0.25
+    train_history_fraction: float = 0.25
+    test_history_fraction: float = 2.0
 
 
 def build_parameter_matrix(config: FisherKPPDiskConfig) -> tuple[np.ndarray, list[str]]:
@@ -59,17 +61,20 @@ def solve_trajectory(
     parameters: np.ndarray,
     mask: np.ndarray,
     config: FisherKPPDiskConfig,
+    *,
+    history_fraction: float,
+    num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     diffusion, growth_rate, initial_amplitude, initial_condition_seed = parameters
     dx = float(x[1] - x[0])
     effective_rate = growth_rate + 10.0 * diffusion
     steady_time_estimate = 4.0 / effective_rate
-    total_time = config.history_fraction * steady_time_estimate
+    total_time = history_fraction * steady_time_estimate
     max_dt = 0.22 * dx * dx / diffusion
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
-        num_snapshots=config.num_snapshots,
+        num_snapshots=num_snapshots,
     )
 
     xx, yy = np.meshgrid(x, y, indexing="xy")
@@ -128,21 +133,39 @@ def generate_dataset(config: FisherKPPDiskConfig | None = None) -> dict[str, Pat
     steady_time_estimates = np.zeros(config.total_trajectories, dtype=np.float64)
 
     for trajectory_index, parameters in enumerate(parameter_matrix):
-        states, times, steady_time = solve_trajectory(x, y, parameters, mask, config)
-        assert states.shape[0] == config.num_snapshots
-        steady_time_estimates[trajectory_index] = steady_time
         if trajectory_index < config.train_trajectories:
+            states, times, steady_time = solve_trajectory(
+                x,
+                y,
+                parameters,
+                mask,
+                config,
+                history_fraction=config.train_history_fraction,
+                num_snapshots=config.train_num_snapshots,
+            )
+            assert states.shape[0] == config.train_num_snapshots
             train_states.append(states)
             train_times.append(times)
         else:
+            states, times, steady_time = solve_trajectory(
+                x,
+                y,
+                parameters,
+                mask,
+                config,
+                history_fraction=config.test_history_fraction,
+                num_snapshots=config.test_num_snapshots,
+            )
+            assert states.shape[0] == config.test_num_snapshots
             test_states.append(states)
             test_times.append(times)
+        steady_time_estimates[trajectory_index] = steady_time
 
     metadata = {
         "case": "fisher_kpp_disk",
         "equation": "u_t = diffusion * Laplacian(u) + growth_rate * u * (1 - u)",
         "boundary_conditions": "Embedded disk with homogeneous Dirichlet boundary values",
-        "notes": "This is the nonlinear 2D disk geometry case.",
+        "notes": "Training trajectories cover only the early transient, while the held-out test trajectory is extended close to the nonlinear steady state on the disk.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"
@@ -179,19 +202,23 @@ def parse_args() -> FisherKPPDiskConfig:
     parser.add_argument("--output-dir", type=Path, default=FisherKPPDiskConfig.output_dir)
     parser.add_argument("--seed", type=int, default=FisherKPPDiskConfig.seed)
     parser.add_argument("--grid-size", type=int, default=FisherKPPDiskConfig.grid_size)
-    parser.add_argument("--num-snapshots", type=int, default=FisherKPPDiskConfig.num_snapshots)
+    parser.add_argument("--train-num-snapshots", type=int, default=FisherKPPDiskConfig.train_num_snapshots)
+    parser.add_argument("--test-num-snapshots", type=int, default=FisherKPPDiskConfig.test_num_snapshots)
     parser.add_argument("--train-trajectories", type=int, default=FisherKPPDiskConfig.train_trajectories)
     parser.add_argument("--total-trajectories", type=int, default=FisherKPPDiskConfig.total_trajectories)
-    parser.add_argument("--history-fraction", type=float, default=FisherKPPDiskConfig.history_fraction)
+    parser.add_argument("--train-history-fraction", type=float, default=FisherKPPDiskConfig.train_history_fraction)
+    parser.add_argument("--test-history-fraction", type=float, default=FisherKPPDiskConfig.test_history_fraction)
     args = parser.parse_args()
     return FisherKPPDiskConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         grid_size=args.grid_size,
-        num_snapshots=args.num_snapshots,
+        train_num_snapshots=args.train_num_snapshots,
+        test_num_snapshots=args.test_num_snapshots,
         train_trajectories=args.train_trajectories,
         total_trajectories=args.total_trajectories,
-        history_fraction=args.history_fraction,
+        train_history_fraction=args.train_history_fraction,
+        test_history_fraction=args.test_history_fraction,
     )
 
 

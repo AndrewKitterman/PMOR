@@ -22,7 +22,8 @@ on `x in [0, 1]` with constant Dirichlet boundary values. The boundary values, w
 
 - Spatial grid: `129` points on `[0, 1]`
 - Time integration: centered explicit damped-wave update with a CFL-based `dt`
-- Saved history: `32` snapshots over the first `25%` of a damping-based steady-state estimate
+- Training history: `32` snapshots over the first `25%` of a damping-based steady-state estimate
+- Test history: `64` snapshots over `200%` of the same estimate so the final snapshots lie near the static profile
 
 The boundary values stay fixed for all time, and the damped dynamics drive the transient toward the corresponding static profile.
 

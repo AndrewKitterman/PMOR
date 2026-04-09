@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import shutil
 import unittest
 from pathlib import Path
 
@@ -33,6 +33,7 @@ def verify_dataset(
     dataset: np.lib.npyio.NpzFile,
     *,
     expected_case_name: str,
+    expected_split_name: str,
     expected_trajectories: int,
     expected_snapshots: int,
     expected_state_shape: tuple[int, ...],
@@ -59,7 +60,9 @@ def verify_dataset(
     assert parameter_names[-1] == "initial_condition_seed"
     metadata = json.loads(str(dataset["metadata_json"]))
     assert metadata["case"] == expected_case_name
-    assert int(metadata["config"]["num_snapshots"]) == expected_snapshots
+    assert dataset["split_name"].item() == expected_split_name
+    snapshot_key = "train_num_snapshots" if expected_split_name == "train" else "test_num_snapshots"
+    assert int(metadata["config"][snapshot_key]) == expected_snapshots
     assert np.all(steady_time_estimates > 0.0)
 
     for trajectory_index in range(expected_trajectories):
@@ -80,7 +83,8 @@ class GeneratorSmokeTests(unittest.TestCase):
                     DampedWave1DConfig(
                         output_dir=root / "damped_wave_1d",
                         num_points=65,
-                        num_snapshots=8,
+                        train_num_snapshots=8,
+                        test_num_snapshots=14,
                         train_trajectories=2,
                         total_trajectories=3,
                     ),
@@ -94,7 +98,8 @@ class GeneratorSmokeTests(unittest.TestCase):
                     Burgers1DConfig(
                         output_dir=root / "burgers_1d",
                         num_points=96,
-                        num_snapshots=8,
+                        train_num_snapshots=8,
+                        test_num_snapshots=14,
                         train_trajectories=2,
                         total_trajectories=3,
                     ),
@@ -108,7 +113,8 @@ class GeneratorSmokeTests(unittest.TestCase):
                     HeatSquareConfig(
                         output_dir=root / "heat_square",
                         grid_size=24,
-                        num_snapshots=6,
+                        train_num_snapshots=6,
+                        test_num_snapshots=12,
                         train_trajectories=2,
                         total_trajectories=3,
                     ),
@@ -122,7 +128,8 @@ class GeneratorSmokeTests(unittest.TestCase):
                     FisherKPPDiskConfig(
                         output_dir=root / "fisher_kpp_disk",
                         grid_size=24,
-                        num_snapshots=6,
+                        train_num_snapshots=6,
+                        test_num_snapshots=12,
                         train_trajectories=2,
                         total_trajectories=3,
                     ),
@@ -132,8 +139,12 @@ class GeneratorSmokeTests(unittest.TestCase):
             ),
         ]
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
+        repo_root = Path(__file__).resolve().parents[1]
+        root = repo_root / ".tmp_generator_tests"
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
             for case_name, builder in cases:
                 config, generator, state_shape = builder(root)
                 with self.subTest(case=case_name):
@@ -142,16 +153,18 @@ class GeneratorSmokeTests(unittest.TestCase):
                         verify_dataset(
                             train_dataset,
                             expected_case_name=case_name,
+                            expected_split_name="train",
                             expected_trajectories=config.train_trajectories,
-                            expected_snapshots=config.num_snapshots,
+                            expected_snapshots=config.train_num_snapshots,
                             expected_state_shape=state_shape,
                         )
                     with np.load(outputs["test"], allow_pickle=False) as test_dataset:
                         verify_dataset(
                             test_dataset,
                             expected_case_name=case_name,
+                            expected_split_name="test",
                             expected_trajectories=config.total_trajectories - config.train_trajectories,
-                            expected_snapshots=config.num_snapshots,
+                            expected_snapshots=config.test_num_snapshots,
                             expected_state_shape=state_shape,
                         )
 
@@ -159,6 +172,12 @@ class GeneratorSmokeTests(unittest.TestCase):
                             mask = test_dataset["mask"].astype(bool)
                             states = test_dataset["states"]
                             self.assertTrue(np.allclose(states[:, ~mask], 0.0))
+
+                        tail_delta = np.linalg.norm(test_dataset["states"][-1] - test_dataset["states"][-2])
+                        initial_delta = np.linalg.norm(test_dataset["states"][1] - test_dataset["states"][0])
+                        self.assertLess(tail_delta, 0.30 * initial_delta)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_committed_default_datasets_match_generator_defaults(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -201,8 +220,9 @@ class GeneratorSmokeTests(unittest.TestCase):
                     verify_dataset(
                         train_dataset,
                         expected_case_name=case_name,
+                        expected_split_name="train",
                         expected_trajectories=config.train_trajectories,
-                        expected_snapshots=config.num_snapshots,
+                        expected_snapshots=config.train_num_snapshots,
                         expected_state_shape=state_shape,
                     )
                     np.testing.assert_array_equal(train_dataset["parameter_names"], np.array(expected_names))
@@ -215,8 +235,9 @@ class GeneratorSmokeTests(unittest.TestCase):
                     verify_dataset(
                         test_dataset,
                         expected_case_name=case_name,
+                        expected_split_name="test",
                         expected_trajectories=config.total_trajectories - config.train_trajectories,
-                        expected_snapshots=config.num_snapshots,
+                        expected_snapshots=config.test_num_snapshots,
                         expected_state_shape=state_shape,
                     )
                     np.testing.assert_array_equal(test_dataset["parameter_names"], np.array(expected_names))
@@ -224,6 +245,9 @@ class GeneratorSmokeTests(unittest.TestCase):
                         test_dataset["parameter_matrix"],
                         expected_parameters[config.train_trajectories :],
                     )
+                    tail_delta = np.linalg.norm(test_dataset["states"][-1] - test_dataset["states"][-2])
+                    initial_delta = np.linalg.norm(test_dataset["states"][1] - test_dataset["states"][0])
+                    self.assertLess(tail_delta, 0.20 * initial_delta)
 
 
 if __name__ == "__main__":

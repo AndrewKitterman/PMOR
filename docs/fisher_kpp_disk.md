@@ -19,7 +19,8 @@ on a disk embedded in a Cartesian square grid. Values outside the mask are fixed
 
 - Grid: `48 x 48` Cartesian grid with a disk mask of radius `0.45`
 - Time integration: explicit diffusion step plus exact logistic reaction update
-- Saved history: `24` snapshots over the first `25%` of a combined reaction-diffusion relaxation estimate
+- Training history: `24` snapshots over the first `25%` of a combined reaction-diffusion relaxation estimate
+- Test history: `64` snapshots over `200%` of the same estimate so the final snapshots are much closer to the nonlinear steady state on the disk
 
 This is the nonlinear 2D geometry-variation case in the repo.
 

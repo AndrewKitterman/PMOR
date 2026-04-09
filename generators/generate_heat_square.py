@@ -27,10 +27,12 @@ class HeatSquareConfig:
     output_dir: Path = Path("data/heat_square")
     seed: int = 16180
     grid_size: int = 48
-    num_snapshots: int = 24
+    train_num_snapshots: int = 24
+    test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    history_fraction: float = 0.25
+    train_history_fraction: float = 0.25
+    test_history_fraction: float = 2.0
     ic_modes: int = 4
 
 
@@ -99,6 +101,9 @@ def solve_trajectory(
     y: np.ndarray,
     parameters: np.ndarray,
     config: HeatSquareConfig,
+    *,
+    history_fraction: float,
+    num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     (
         diffusivity,
@@ -111,12 +116,12 @@ def solve_trajectory(
     ) = parameters
     dx = float(x[1] - x[0])
     steady_time_estimate = 2.0 / (diffusivity * np.pi**2)
-    total_time = config.history_fraction * steady_time_estimate
+    total_time = history_fraction * steady_time_estimate
     max_dt = 0.22 * dx * dx / diffusivity
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
-        num_snapshots=config.num_snapshots,
+        num_snapshots=num_snapshots,
     )
 
     xx, yy = np.meshgrid(x, y, indexing="xy")
@@ -182,21 +187,37 @@ def generate_dataset(config: HeatSquareConfig | None = None) -> dict[str, Path]:
     steady_time_estimates = np.zeros(config.total_trajectories, dtype=np.float64)
 
     for trajectory_index, parameters in enumerate(parameter_matrix):
-        states, times, steady_time = solve_trajectory(x, y, parameters, config)
-        assert states.shape[0] == config.num_snapshots
-        steady_time_estimates[trajectory_index] = steady_time
         if trajectory_index < config.train_trajectories:
+            states, times, steady_time = solve_trajectory(
+                x,
+                y,
+                parameters,
+                config,
+                history_fraction=config.train_history_fraction,
+                num_snapshots=config.train_num_snapshots,
+            )
+            assert states.shape[0] == config.train_num_snapshots
             train_states.append(states)
             train_times.append(times)
         else:
+            states, times, steady_time = solve_trajectory(
+                x,
+                y,
+                parameters,
+                config,
+                history_fraction=config.test_history_fraction,
+                num_snapshots=config.test_num_snapshots,
+            )
+            assert states.shape[0] == config.test_num_snapshots
             test_states.append(states)
             test_times.append(times)
+        steady_time_estimates[trajectory_index] = steady_time
 
     metadata = {
         "case": "heat_square",
         "equation": "u_t = diffusivity * (u_xx + u_yy)",
         "boundary_conditions": "Dirichlet on all four sides with parameterized values",
-        "notes": "This is the boundary-condition-parameterized 2D case.",
+        "notes": "Training trajectories are short transients, while the held-out test trajectory is extended so the final snapshots sit near the steady boundary-value solution.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"
@@ -233,20 +254,24 @@ def parse_args() -> HeatSquareConfig:
     parser.add_argument("--output-dir", type=Path, default=HeatSquareConfig.output_dir)
     parser.add_argument("--seed", type=int, default=HeatSquareConfig.seed)
     parser.add_argument("--grid-size", type=int, default=HeatSquareConfig.grid_size)
-    parser.add_argument("--num-snapshots", type=int, default=HeatSquareConfig.num_snapshots)
+    parser.add_argument("--train-num-snapshots", type=int, default=HeatSquareConfig.train_num_snapshots)
+    parser.add_argument("--test-num-snapshots", type=int, default=HeatSquareConfig.test_num_snapshots)
     parser.add_argument("--train-trajectories", type=int, default=HeatSquareConfig.train_trajectories)
     parser.add_argument("--total-trajectories", type=int, default=HeatSquareConfig.total_trajectories)
-    parser.add_argument("--history-fraction", type=float, default=HeatSquareConfig.history_fraction)
+    parser.add_argument("--train-history-fraction", type=float, default=HeatSquareConfig.train_history_fraction)
+    parser.add_argument("--test-history-fraction", type=float, default=HeatSquareConfig.test_history_fraction)
     parser.add_argument("--ic-modes", type=int, default=HeatSquareConfig.ic_modes)
     args = parser.parse_args()
     return HeatSquareConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         grid_size=args.grid_size,
-        num_snapshots=args.num_snapshots,
+        train_num_snapshots=args.train_num_snapshots,
+        test_num_snapshots=args.test_num_snapshots,
         train_trajectories=args.train_trajectories,
         total_trajectories=args.total_trajectories,
-        history_fraction=args.history_fraction,
+        train_history_fraction=args.train_history_fraction,
+        test_history_fraction=args.test_history_fraction,
         ic_modes=args.ic_modes,
     )
 

@@ -22,7 +22,8 @@ on the unit square with parameterized Dirichlet values on the left, right, botto
 
 - Grid: `48 x 48`
 - Time integration: explicit five-point stencil with a conservative diffusion stability limit
-- Saved history: `24` snapshots over the first `25%` of a diffusion-based steady-state estimate
+- Training history: `24` snapshots over the first `25%` of a diffusion-based steady-state estimate
+- Test history: `64` snapshots over `200%` of the same estimate so the final snapshots sit near the steady boundary-value solution
 
 This is the clean boundary-condition-parameterized 2D case in the repo.
 

@@ -28,10 +28,12 @@ class Burgers1DConfig:
     output_dir: Path = Path("data/burgers_1d")
     seed: int = 14142
     num_points: int = 192
-    num_snapshots: int = 32
+    train_num_snapshots: int = 32
+    test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    history_fraction: float = 0.25
+    train_history_fraction: float = 0.25
+    test_history_fraction: float = 2.0
     ic_modes: int = 5
 
 
@@ -71,17 +73,20 @@ def solve_trajectory(
     x: np.ndarray,
     parameters: np.ndarray,
     config: Burgers1DConfig,
+    *,
+    history_fraction: float,
+    num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     viscosity, mean_level, initial_amplitude, initial_condition_seed = parameters
     dx = float(x[1] - x[0])
     steady_time_estimate = 4.0 / (viscosity * (2.0 * np.pi) ** 2)
-    total_time = config.history_fraction * steady_time_estimate
+    total_time = history_fraction * steady_time_estimate
     speed_bound = max(1.5, abs(mean_level) + 1.2 * initial_amplitude)
     max_dt = min(0.35 * dx / speed_bound, 0.20 * dx * dx / viscosity)
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
-        num_snapshots=config.num_snapshots,
+        num_snapshots=num_snapshots,
     )
 
     state = mean_level + periodic_series(
@@ -122,21 +127,35 @@ def generate_dataset(config: Burgers1DConfig | None = None) -> dict[str, Path]:
     steady_time_estimates = np.zeros(config.total_trajectories, dtype=np.float64)
 
     for trajectory_index, parameters in enumerate(parameter_matrix):
-        states, times, steady_time = solve_trajectory(x, parameters, config)
-        assert states.shape[0] == config.num_snapshots
-        steady_time_estimates[trajectory_index] = steady_time
         if trajectory_index < config.train_trajectories:
+            states, times, steady_time = solve_trajectory(
+                x,
+                parameters,
+                config,
+                history_fraction=config.train_history_fraction,
+                num_snapshots=config.train_num_snapshots,
+            )
+            assert states.shape[0] == config.train_num_snapshots
             train_states.append(states)
             train_times.append(times)
         else:
+            states, times, steady_time = solve_trajectory(
+                x,
+                parameters,
+                config,
+                history_fraction=config.test_history_fraction,
+                num_snapshots=config.test_num_snapshots,
+            )
+            assert states.shape[0] == config.test_num_snapshots
             test_states.append(states)
             test_times.append(times)
+        steady_time_estimates[trajectory_index] = steady_time
 
     metadata = {
         "case": "burgers_1d",
         "equation": "u_t + (0.5 * u^2)_x = viscosity * u_xx",
         "boundary_conditions": "Periodic",
-        "notes": "The mean level is conserved, so the long-time state is a constant profile.",
+        "notes": "Training trajectories cover early transients, while the held-out test trajectory is extended to a near-steady constant profile.",
         "config": asdict(config),
     }
     train_path = config.output_dir / "train.npz"
@@ -173,20 +192,24 @@ def parse_args() -> Burgers1DConfig:
     parser.add_argument("--output-dir", type=Path, default=Burgers1DConfig.output_dir)
     parser.add_argument("--seed", type=int, default=Burgers1DConfig.seed)
     parser.add_argument("--num-points", type=int, default=Burgers1DConfig.num_points)
-    parser.add_argument("--num-snapshots", type=int, default=Burgers1DConfig.num_snapshots)
+    parser.add_argument("--train-num-snapshots", type=int, default=Burgers1DConfig.train_num_snapshots)
+    parser.add_argument("--test-num-snapshots", type=int, default=Burgers1DConfig.test_num_snapshots)
     parser.add_argument("--train-trajectories", type=int, default=Burgers1DConfig.train_trajectories)
     parser.add_argument("--total-trajectories", type=int, default=Burgers1DConfig.total_trajectories)
-    parser.add_argument("--history-fraction", type=float, default=Burgers1DConfig.history_fraction)
+    parser.add_argument("--train-history-fraction", type=float, default=Burgers1DConfig.train_history_fraction)
+    parser.add_argument("--test-history-fraction", type=float, default=Burgers1DConfig.test_history_fraction)
     parser.add_argument("--ic-modes", type=int, default=Burgers1DConfig.ic_modes)
     args = parser.parse_args()
     return Burgers1DConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         num_points=args.num_points,
-        num_snapshots=args.num_snapshots,
+        train_num_snapshots=args.train_num_snapshots,
+        test_num_snapshots=args.test_num_snapshots,
         train_trajectories=args.train_trajectories,
         total_trajectories=args.total_trajectories,
-        history_fraction=args.history_fraction,
+        train_history_fraction=args.train_history_fraction,
+        test_history_fraction=args.test_history_fraction,
         ic_modes=args.ic_modes,
     )
 

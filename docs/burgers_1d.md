@@ -20,7 +20,8 @@ on a periodic unit interval.
 - Spatial grid: `192` periodic points
 - Flux: local Lax-Friedrichs / Rusanov numerical flux
 - Time integration: SSPRK3
-- Saved history: `32` snapshots over the first `25%` of a viscosity-based decay estimate
+- Training history: `32` snapshots over the first `25%` of a viscosity-based decay estimate
+- Test history: `64` snapshots over `200%` of the same estimate so the final snapshots sit close to the constant steady state
 
 The mean level is conserved, so the long-time solution tends toward a constant profile with that same mean.
 

@@ -28,10 +28,12 @@ class DampedWave1DConfig:
     output_dir: Path = Path("data/damped_wave_1d")
     seed: int = 27182
     num_points: int = 129
-    num_snapshots: int = 32
+    train_num_snapshots: int = 32
+    test_num_snapshots: int = 64
     train_trajectories: int = DEFAULT_TRAIN_TRAJECTORIES
     total_trajectories: int = DEFAULT_TOTAL_TRAJECTORIES
-    history_fraction: float = 0.25
+    train_history_fraction: float = 0.25
+    test_history_fraction: float = 2.0
     ic_modes: int = 5
 
 
@@ -66,6 +68,9 @@ def solve_trajectory(
     x: np.ndarray,
     parameters: np.ndarray,
     config: DampedWave1DConfig,
+    *,
+    history_fraction: float,
+    num_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     (
         wave_speed,
@@ -78,12 +83,12 @@ def solve_trajectory(
     ) = parameters
     dx = float(x[1] - x[0])
     steady_time_estimate = 4.0 / damping
-    total_time = config.history_fraction * steady_time_estimate
+    total_time = history_fraction * steady_time_estimate
     max_dt = 0.80 * dx / wave_speed
     times, save_indices, dt, num_steps = stable_time_grid(
         total_time=total_time,
         max_dt=max_dt,
-        num_snapshots=config.num_snapshots,
+        num_snapshots=num_snapshots,
     )
 
     steady_profile = left_bc + (right_bc - left_bc) * x
@@ -155,21 +160,35 @@ def generate_dataset(config: DampedWave1DConfig | None = None) -> dict[str, Path
     steady_time_estimates = np.zeros(config.total_trajectories, dtype=np.float64)
 
     for trajectory_index, parameters in enumerate(parameter_matrix):
-        states, times, steady_time = solve_trajectory(x, parameters, config)
-        assert states.shape[0] == config.num_snapshots
-        steady_time_estimates[trajectory_index] = steady_time
         if trajectory_index < config.train_trajectories:
+            states, times, steady_time = solve_trajectory(
+                x,
+                parameters,
+                config,
+                history_fraction=config.train_history_fraction,
+                num_snapshots=config.train_num_snapshots,
+            )
+            assert states.shape[0] == config.train_num_snapshots
             train_states.append(states)
             train_times.append(times)
         else:
+            states, times, steady_time = solve_trajectory(
+                x,
+                parameters,
+                config,
+                history_fraction=config.test_history_fraction,
+                num_snapshots=config.test_num_snapshots,
+            )
+            assert states.shape[0] == config.test_num_snapshots
             test_states.append(states)
             test_times.append(times)
+        steady_time_estimates[trajectory_index] = steady_time
 
     metadata = {
         "case": "damped_wave_1d",
         "equation": "u_tt + damping * u_t = wave_speed^2 * u_xx",
         "boundary_conditions": "Dirichlet with parameterized left/right displacements",
-        "notes": "The saved window covers the early transient before the long-time damped tail.",
+        "notes": "Training trajectories cover the early transient, while the held-out test trajectory runs through the long-time damped tail toward the static profile.",
         "config": asdict(config),
     }
     output_dir = config.output_dir
@@ -207,20 +226,24 @@ def parse_args() -> DampedWave1DConfig:
     parser.add_argument("--output-dir", type=Path, default=DampedWave1DConfig.output_dir)
     parser.add_argument("--seed", type=int, default=DampedWave1DConfig.seed)
     parser.add_argument("--num-points", type=int, default=DampedWave1DConfig.num_points)
-    parser.add_argument("--num-snapshots", type=int, default=DampedWave1DConfig.num_snapshots)
+    parser.add_argument("--train-num-snapshots", type=int, default=DampedWave1DConfig.train_num_snapshots)
+    parser.add_argument("--test-num-snapshots", type=int, default=DampedWave1DConfig.test_num_snapshots)
     parser.add_argument("--train-trajectories", type=int, default=DampedWave1DConfig.train_trajectories)
     parser.add_argument("--total-trajectories", type=int, default=DampedWave1DConfig.total_trajectories)
-    parser.add_argument("--history-fraction", type=float, default=DampedWave1DConfig.history_fraction)
+    parser.add_argument("--train-history-fraction", type=float, default=DampedWave1DConfig.train_history_fraction)
+    parser.add_argument("--test-history-fraction", type=float, default=DampedWave1DConfig.test_history_fraction)
     parser.add_argument("--ic-modes", type=int, default=DampedWave1DConfig.ic_modes)
     args = parser.parse_args()
     return DampedWave1DConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         num_points=args.num_points,
-        num_snapshots=args.num_snapshots,
+        train_num_snapshots=args.train_num_snapshots,
+        test_num_snapshots=args.test_num_snapshots,
         train_trajectories=args.train_trajectories,
         total_trajectories=args.total_trajectories,
-        history_fraction=args.history_fraction,
+        train_history_fraction=args.train_history_fraction,
+        test_history_fraction=args.test_history_fraction,
         ic_modes=args.ic_modes,
     )
 

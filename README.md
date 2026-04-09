@@ -7,7 +7,7 @@ This repository now contains four deterministic PDE data generators for parametr
 - `heat_square`: 2D heat equation on the unit square with parameterized boundary temperatures on all four sides.
 - `fisher_kpp_disk`: 2D Fisher-KPP reaction-diffusion equation on a disk embedded in a Cartesian grid.
 
-Each generator writes one training file and one testing file. By default, the first `50` parameter settings become training trajectories and the `51st` parameter setting is reserved as the held-out test trajectory. Every saved rollout covers only the early transient, about `25%` of a conservative steady-state time estimate, so the later steady state is left for downstream prediction models.
+Each generator writes one training file and one testing file. By default, the first `50` parameter settings become training trajectories and the `51st` parameter setting is reserved as the held-out test trajectory. The training rollouts still cover only the early transient, about `25%` of a conservative steady-state time estimate, while the held-out test rollout is extended with more saved snapshots so its tail approaches steady state.
 
 ## Repository Layout
 
